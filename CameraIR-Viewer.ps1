@@ -77,7 +77,20 @@ function Get-DshowAudioDevices {
     $ffmpeg = Get-FfmpegPath
     if ([string]::IsNullOrWhiteSpace($ffmpeg)) { return @() }
 
-    $output = & $ffmpeg -hide_banner -list_devices true -f dshow -i dummy 2>&1 | Out-String
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $ffmpeg
+    foreach ($arg in @('-hide_banner', '-list_devices', 'true', '-f', 'dshow', '-i', 'dummy')) {
+        [void]$psi.ArgumentList.Add($arg)
+    }
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+
+    $process = [System.Diagnostics.Process]::Start($psi)
+    $output = $process.StandardOutput.ReadToEnd() + "`n" + $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+
     $devices = @()
 
     foreach ($line in ($output -split "`r?`n")) {
