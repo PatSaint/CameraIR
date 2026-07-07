@@ -1,0 +1,6 @@
+captures/
+recording_*/
+ir-frame*.png
+ir-frame*.pgm
+*.tmp
+*.log
