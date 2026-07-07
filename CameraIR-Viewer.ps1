@@ -243,6 +243,7 @@ $script:RecordFrameIndex = 0
 $script:RecordStartedAt = $null
 $script:AudioProcess = $null
 $script:AudioPath = $null
+$script:IsRefreshingSelection = $false
 
 $form = [System.Windows.Forms.Form]::new()
 $form.Text = 'CameraIR Viewer'
@@ -416,15 +417,21 @@ function Refresh-AudioDevices {
 }
 
 function Refresh-Sources {
+    $script:IsRefreshingSelection = $true
     $cmbSource.Items.Clear()
     $groupItem = $cmbGroup.SelectedItem
-    if ($null -eq $groupItem) { return }
+    if ($null -eq $groupItem) {
+        $script:IsRefreshingSelection = $false
+        return
+    }
 
     foreach ($sourceInfo in $groupItem.Value.SourceInfos) {
         [void]$cmbSource.Items.Add([pscustomobject]@{ Label = (Get-SourceLabel $sourceInfo); Value = $sourceInfo })
     }
     $cmbSource.DisplayMember = 'Label'
     if ($cmbSource.Items.Count -gt 0) { $cmbSource.SelectedIndex = 0 }
+    $script:IsRefreshingSelection = $false
+    Refresh-Formats
 }
 
 function Initialize-CaptureForSelectedGroup {
@@ -442,6 +449,11 @@ function Initialize-CaptureForSelectedGroup {
 }
 
 function Refresh-Formats {
+    $wasRunning = $timer.Enabled
+    if ($wasRunning) {
+        Stop-Preview -KeepSelection
+    }
+
     $cmbFormat.Items.Clear()
     if ($null -eq $cmbGroup.SelectedItem -or $null -eq $cmbSource.SelectedItem) { return }
 
@@ -465,6 +477,10 @@ function Refresh-Formats {
         if ($cmbFormat.Items.Count -gt 0) { $cmbFormat.SelectedIndex = 0 }
 
         Set-MetadataText "Grupo: $($cmbGroup.SelectedItem.Value.DisplayName)`r`nStream: $($script:CurrentSource.Info.SourceKind)`r`nActual: $(Get-FormatLabel $script:CurrentSource.CurrentFormat)`r`nFormatos: $($cmbFormat.Items.Count)"
+
+        if ($wasRunning) {
+            Start-Preview
+        }
     }
     catch {
         Set-MetadataText $_.Exception.ToString()
@@ -489,15 +505,23 @@ function Start-Preview {
     if ($startStatus.ToString() -ne 'Success') { throw "No pudo iniciar el reader: $startStatus" }
 
     $timer.Start()
+    $btnStart.Text = 'Preview activo'
 }
 
 function Stop-Preview {
+    param([switch]$KeepSelection)
+
     if ($script:IsRecording) {
         Stop-Recording
     }
 
     $timer.Stop()
     Dispose-CaptureState
+    $btnStart.Text = 'Iniciar preview'
+
+    if (-not $KeepSelection) {
+        Set-MetadataText 'Preview detenido.'
+    }
 }
 
 function Start-Recording {
@@ -627,10 +651,30 @@ $timer.Add_Tick({
     }
 })
 
-$cmbGroup.Add_SelectedIndexChanged({ Refresh-Sources })
-$cmbSource.Add_SelectedIndexChanged({ Refresh-Formats })
+$cmbGroup.Add_SelectedIndexChanged({
+    if (-not $script:IsRefreshingSelection) { Refresh-Sources }
+})
+$cmbSource.Add_SelectedIndexChanged({
+    if (-not $script:IsRefreshingSelection) { Refresh-Formats }
+})
+$cmbFormat.Add_SelectedIndexChanged({
+    if (-not $script:IsRefreshingSelection -and $timer.Enabled) {
+        try {
+            Stop-Preview -KeepSelection
+            Start-Preview
+        }
+        catch { Set-MetadataText $_.Exception.ToString() }
+    }
+})
 $btnStart.Add_Click({
-    try { Start-Preview }
+    try {
+        if ($timer.Enabled) {
+            Stop-Preview
+        }
+        else {
+            Start-Preview
+        }
+    }
     catch { Set-MetadataText $_.Exception.ToString() }
 })
 $btnStop.Add_Click({ Stop-Preview })
@@ -659,6 +703,10 @@ $btnVideo.Add_Click({
 })
 $btnBridge.Add_Click({
     [System.Windows.Forms.MessageBox]::Show('Puente virtual proximamente. La base sera este mismo capturador, publicando frames como camara virtual.', 'Proximamente') | Out-Null
+})
+$form.Add_Shown({
+    try { Start-Preview }
+    catch { Set-MetadataText $_.Exception.ToString() }
 })
 $form.Add_FormClosing({ Stop-Preview })
 
