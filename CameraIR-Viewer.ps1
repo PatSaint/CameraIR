@@ -15,6 +15,9 @@ Add-Type -AssemblyName System.Drawing
 [void][Windows.Media.Capture.MediaCaptureMemoryPreference,Windows.Media.Capture,ContentType=WindowsRuntime]
 [void][Windows.Media.Capture.Frames.MediaFrameSourceGroup,Windows.Media.Capture,ContentType=WindowsRuntime]
 [void][Windows.Media.Capture.Frames.MediaFrameReaderStartStatus,Windows.Media.Capture,ContentType=WindowsRuntime]
+[void][Windows.Graphics.Imaging.SoftwareBitmap,Windows.Graphics,ContentType=WindowsRuntime]
+[void][Windows.Graphics.Imaging.BitmapPixelFormat,Windows.Graphics,ContentType=WindowsRuntime]
+[void][Windows.Graphics.Imaging.BitmapAlphaMode,Windows.Graphics,ContentType=WindowsRuntime]
 [void][Windows.Storage.Streams.Buffer,Windows.Storage.Streams,ContentType=WindowsRuntime]
 [void][Windows.Storage.Streams.DataReader,Windows.Storage.Streams,ContentType=WindowsRuntime]
 
@@ -184,10 +187,13 @@ function Convert-SoftwareBitmapToBitmap {
     }
 
     function Get-BitmapBytes {
-        param([int]$ByteCount)
+        param(
+            [Parameter(Mandatory)]$Bitmap,
+            [int]$ByteCount
+        )
 
         $buffer = [Windows.Storage.Streams.Buffer]::new($ByteCount)
-        $SoftwareBitmap.CopyToBuffer($buffer)
+        $Bitmap.CopyToBuffer($buffer)
 
         $bytes = New-Object byte[] $ByteCount
         $dataReader = [Windows.Storage.Streams.DataReader]::FromBuffer($buffer)
@@ -195,8 +201,38 @@ function Convert-SoftwareBitmapToBitmap {
         return $bytes
     }
 
+    function Convert-BgraBitmapToDrawingBitmap {
+        param([Parameter(Mandatory)]$Bitmap)
+
+        $bgraBytes = Get-BitmapBytes -Bitmap $Bitmap -ByteCount ($Bitmap.PixelWidth * $Bitmap.PixelHeight * 4)
+        $drawingBitmap = [System.Drawing.Bitmap]::new($Bitmap.PixelWidth, $Bitmap.PixelHeight, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+        $rect = [System.Drawing.Rectangle]::new(0, 0, $Bitmap.PixelWidth, $Bitmap.PixelHeight)
+        $bits = $drawingBitmap.LockBits($rect, [System.Drawing.Imaging.ImageLockMode]::WriteOnly, $drawingBitmap.PixelFormat)
+
+        try {
+            $stride = [Math]::Abs($bits.Stride)
+            $rowBytes = $Bitmap.PixelWidth * 4
+
+            if ($stride -eq $rowBytes) {
+                [System.Runtime.InteropServices.Marshal]::Copy($bgraBytes, 0, $bits.Scan0, $bgraBytes.Length)
+            }
+            else {
+                $padded = New-Object byte[] ($stride * $Bitmap.PixelHeight)
+                for ($y = 0; $y -lt $Bitmap.PixelHeight; $y++) {
+                    [Array]::Copy($bgraBytes, $y * $rowBytes, $padded, $y * $stride, $rowBytes)
+                }
+                [System.Runtime.InteropServices.Marshal]::Copy($padded, 0, $bits.Scan0, $padded.Length)
+            }
+        }
+        finally {
+            $drawingBitmap.UnlockBits($bits)
+        }
+
+        return $drawingBitmap
+    }
+
     if ($format -eq 'Gray8') {
-        $gray = Get-BitmapBytes -ByteCount ($width * $height)
+        $gray = Get-BitmapBytes -Bitmap $SoftwareBitmap -ByteCount ($width * $height)
 
         $bitmap = [System.Drawing.Bitmap]::new($width, $height, [System.Drawing.Imaging.PixelFormat]::Format8bppIndexed)
         $palette = $bitmap.Palette
@@ -228,8 +264,28 @@ function Convert-SoftwareBitmapToBitmap {
         return $bitmap
     }
 
+    if ($format -eq 'Bgra8') {
+        return Convert-BgraBitmapToDrawingBitmap -Bitmap $SoftwareBitmap
+    }
+
+    if ($format -eq 'Yuy2' -or $format -eq 'Nv12') {
+        $converted = $null
+        try {
+            $converted = [Windows.Graphics.Imaging.SoftwareBitmap]::Convert(
+                $SoftwareBitmap,
+                [Windows.Graphics.Imaging.BitmapPixelFormat]::Bgra8,
+                [Windows.Graphics.Imaging.BitmapAlphaMode]::Premultiplied
+            )
+
+            return Convert-BgraBitmapToDrawingBitmap -Bitmap $converted
+        }
+        finally {
+            if ($converted -is [System.IDisposable]) { $converted.Dispose() }
+        }
+    }
+
     if ($format -eq 'Yuy2') {
-        $bytes = Get-BitmapBytes -ByteCount ($width * $height * 2)
+        $bytes = Get-BitmapBytes -Bitmap $SoftwareBitmap -ByteCount ($width * $height * 2)
         $rgb = New-Object byte[] ($width * $height * 3)
 
         for ($i = 0; $i -lt $bytes.Length; $i += 4) {
@@ -257,7 +313,7 @@ function Convert-SoftwareBitmapToBitmap {
 
     if ($format -eq 'Nv12') {
         $yPlaneSize = $width * $height
-        $bytes = Get-BitmapBytes -ByteCount ($yPlaneSize + ($yPlaneSize / 2))
+        $bytes = Get-BitmapBytes -Bitmap $SoftwareBitmap -ByteCount ($yPlaneSize + ($yPlaneSize / 2))
         $rgb = New-Object byte[] ($width * $height * 3)
 
         for ($y = 0; $y -lt $height; $y++) {
