@@ -1,5 +1,5 @@
 param(
-    [string]$OutputDirectory = (Join-Path (Get-Location) 'captures')
+    [string]$OutputDirectory = (Join-Path $PSScriptRoot 'captures')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -197,16 +197,35 @@ function Convert-SoftwareBitmapToBitmap {
 
     if ($format -eq 'Gray8') {
         $gray = Get-BitmapBytes -ByteCount ($width * $height)
-        $rgb = New-Object byte[] ($width * $height * 3)
 
-        for ($i = 0; $i -lt $gray.Length; $i++) {
-            $offset = $i * 3
-            $rgb[$offset] = $gray[$i]
-            $rgb[$offset + 1] = $gray[$i]
-            $rgb[$offset + 2] = $gray[$i]
+        $bitmap = [System.Drawing.Bitmap]::new($width, $height, [System.Drawing.Imaging.PixelFormat]::Format8bppIndexed)
+        $palette = $bitmap.Palette
+        for ($i = 0; $i -lt 256; $i++) {
+            $palette.Entries[$i] = [System.Drawing.Color]::FromArgb($i, $i, $i)
+        }
+        $bitmap.Palette = $palette
+
+        $rect = [System.Drawing.Rectangle]::new(0, 0, $width, $height)
+        $bits = $bitmap.LockBits($rect, [System.Drawing.Imaging.ImageLockMode]::WriteOnly, $bitmap.PixelFormat)
+
+        try {
+            $stride = [Math]::Abs($bits.Stride)
+            if ($stride -eq $width) {
+                [System.Runtime.InteropServices.Marshal]::Copy($gray, 0, $bits.Scan0, $gray.Length)
+            }
+            else {
+                $padded = New-Object byte[] ($stride * $height)
+                for ($y = 0; $y -lt $height; $y++) {
+                    [Array]::Copy($gray, $y * $width, $padded, $y * $stride, $width)
+                }
+                [System.Runtime.InteropServices.Marshal]::Copy($padded, 0, $bits.Scan0, $padded.Length)
+            }
+        }
+        finally {
+            $bitmap.UnlockBits($bits)
         }
 
-        return New-RgbBitmap -Width $width -Height $height -RgbBytes $rgb
+        return $bitmap
     }
 
     if ($format -eq 'Yuy2') {
@@ -411,7 +430,7 @@ $txtMetadata.Font = [System.Drawing.Font]::new('Consolas', 9)
 $leftPanel.Controls.Add($txtMetadata)
 
 $timer = [System.Windows.Forms.Timer]::new()
-$timer.Interval = 100
+$timer.Interval = 500
 
 function Set-MetadataText {
     param([string]$Text)
@@ -435,11 +454,21 @@ function Get-FormatLabel {
 
 function Refresh-Groups {
     $cmbGroup.Items.Clear()
+    $preferredIndex = -1
     foreach ($group in $script:Groups) {
-        [void]$cmbGroup.Items.Add([pscustomobject]@{ Label = (Get-GroupLabel $group); Value = $group })
+        $item = [pscustomobject]@{ Label = (Get-GroupLabel $group); Value = $group }
+        [void]$cmbGroup.Items.Add($item)
+        if ($preferredIndex -lt 0 -and $group.DisplayName -like '*IR*') {
+            $preferredIndex = $cmbGroup.Items.Count - 1
+        }
     }
     $cmbGroup.DisplayMember = 'Label'
-    if ($cmbGroup.Items.Count -gt 0) { $cmbGroup.SelectedIndex = 0 }
+    if ($preferredIndex -ge 0) {
+        $cmbGroup.SelectedIndex = $preferredIndex
+    }
+    elseif ($cmbGroup.Items.Count -gt 0) {
+        $cmbGroup.SelectedIndex = 0
+    }
 }
 
 function Refresh-AudioDevices {
