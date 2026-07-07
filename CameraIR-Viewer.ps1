@@ -79,9 +79,7 @@ function Get-DshowAudioDevices {
 
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = $ffmpeg
-    foreach ($arg in @('-hide_banner', '-list_devices', 'true', '-f', 'dshow', '-i', 'dummy')) {
-        [void]$psi.ArgumentList.Add($arg)
-    }
+    $psi.Arguments = '-hide_banner -list_devices true -f dshow -i dummy'
     $psi.UseShellExecute = $false
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
@@ -528,10 +526,11 @@ function Start-Recording {
             throw 'Marcaste audio, pero no seleccionaste un microfono.'
         }
 
-        $audioArgs = @('-y', '-f', 'dshow', '-i', "audio=$audioDevice", '-acodec', 'pcm_s16le', $script:AudioPath)
         $psi = [System.Diagnostics.ProcessStartInfo]::new()
         $psi.FileName = $ffmpeg
-        foreach ($arg in $audioArgs) { [void]$psi.ArgumentList.Add($arg) }
+        $escapedAudioDevice = $audioDevice.Replace('"', '\"')
+        $escapedAudioPath = $script:AudioPath.Replace('"', '\"')
+        $psi.Arguments = "-y -f dshow -i `"audio=$escapedAudioDevice`" -acodec pcm_s16le `"$escapedAudioPath`""
         $psi.UseShellExecute = $false
         $psi.RedirectStandardInput = $true
         $psi.RedirectStandardError = $true
