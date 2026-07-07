@@ -544,6 +544,16 @@ function Set-MetadataText {
     $txtMetadata.Text = $Text
 }
 
+function Set-CameraSelectionEnabled {
+    param([bool]$Enabled)
+
+    $cmbGroup.Enabled = $Enabled
+    $cmbSource.Enabled = $Enabled
+    $cmbFormat.Enabled = $Enabled
+    $cmbAudio.Enabled = $Enabled
+    $chkAudio.Enabled = $Enabled
+}
+
 function Get-GroupLabel {
     param($Group)
     return "$($Group.DisplayName) | $($Group.Id)"
@@ -762,6 +772,7 @@ function Start-Recording {
 
     $script:IsRecording = $true
     $btnVideo.Text = 'Detener video'
+    Set-CameraSelectionEnabled $false
     Set-MetadataText "Grabando frames en:`r`n$($script:RecordDirectory)"
     Write-AppLog "Recording started directory=$($script:RecordDirectory)"
 }
@@ -790,6 +801,7 @@ function Stop-Recording {
 
     $script:IsRecording = $false
     $btnVideo.Text = 'Grabar video'
+    Set-CameraSelectionEnabled $true
     Stop-AudioRecording
 
     if ($script:RecordFrameIndex -le 0) {
@@ -815,7 +827,6 @@ function Stop-Recording {
     Set-MetadataText "Codificando MP4...`r`nFrames: $($script:RecordFrameIndex)`r`nFPS estimado: $fps"
     [void](Invoke-Ffmpeg -Arguments $args)
 
-    [System.Windows.Forms.MessageBox]::Show("Video guardado:`n$outputFile", 'CameraIR Viewer') | Out-Null
     Set-MetadataText "Video guardado:`r`n$outputFile`r`nFrames: $($script:RecordFrameIndex)`r`nFPS estimado: $fps"
     Write-AppLog "Recording encoded output=$outputFile frames=$($script:RecordFrameIndex) fps=$fps"
 }
@@ -897,9 +908,13 @@ $btnPhoto.Add_Click({
         if ($null -eq $preview.Image) { throw 'No hay frame visible para guardar.' }
         $file = Join-Path $OutputDirectory ("CameraIR_{0:yyyyMMdd_HHmmss}.png" -f [DateTime]::Now)
         $preview.Image.Save($file, [System.Drawing.Imaging.ImageFormat]::Png)
-        [System.Windows.Forms.MessageBox]::Show("Foto guardada:`n$file", 'CameraIR Viewer') | Out-Null
+        Set-MetadataText "Foto guardada:`r`n$file"
+        Write-AppLog "Photo saved path=$file"
     }
-    catch { Set-MetadataText $_.Exception.ToString() }
+    catch {
+        Write-AppException -Context 'Photo button failed' -Exception $_.Exception.ToString()
+        Set-MetadataText $_.Exception.ToString()
+    }
 })
 $btnVideo.Add_Click({
     try {
@@ -913,11 +928,10 @@ $btnVideo.Add_Click({
     catch {
         Write-AppException -Context 'Video button failed' -Exception $_.Exception.ToString()
         Set-MetadataText $_.Exception.ToString()
-        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, 'CameraIR Viewer') | Out-Null
     }
 })
 $btnBridge.Add_Click({
-    [System.Windows.Forms.MessageBox]::Show('Puente virtual proximamente. La base sera este mismo capturador, publicando frames como camara virtual.', 'Proximamente') | Out-Null
+    Set-MetadataText 'Puente virtual proximamente. La base sera este mismo capturador, publicando frames como camara virtual.'
 })
 $form.Add_Shown({
     try {
