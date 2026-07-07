@@ -20,6 +20,12 @@ The viewer supports:
 - Optional microphone capture through FFmpeg/DirectShow.
 - A virtual bridge button marked as coming soon.
 
+Videos are saved under:
+
+```text
+captures\video
+```
+
 ## Diagnostic Tools
 
 Probe WinRT camera groups and formats:

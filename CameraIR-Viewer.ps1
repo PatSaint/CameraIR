@@ -139,6 +139,53 @@ function Get-DshowAudioDevices {
     return $devices
 }
 
+function Join-ProcessArguments {
+    param([string[]]$Arguments)
+
+    $escaped = @()
+    foreach ($arg in $Arguments) {
+        if ($arg -match '[\s"]') {
+            $escaped += '"' + $arg.Replace('"', '\"') + '"'
+        }
+        else {
+            $escaped += $arg
+        }
+    }
+
+    return ($escaped -join ' ')
+}
+
+function Invoke-Ffmpeg {
+    param([string[]]$Arguments)
+
+    $ffmpeg = Get-FfmpegPath
+    if ([string]::IsNullOrWhiteSpace($ffmpeg)) {
+        throw 'No encontre ffmpeg en PATH.'
+    }
+
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $ffmpeg
+    $psi.Arguments = Join-ProcessArguments -Arguments $Arguments
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+
+    Write-AppLog "ffmpeg $($psi.Arguments)"
+    $process = [System.Diagnostics.Process]::Start($psi)
+    $stdout = $process.StandardOutput.ReadToEnd()
+    $stderr = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+    $output = "$stdout`n$stderr"
+
+    Write-AppLog "ffmpeg exit=$($process.ExitCode)`r`n$output"
+    if ($process.ExitCode -ne 0) {
+        throw "ffmpeg fallo con codigo $($process.ExitCode):`r`n$output"
+    }
+
+    return $output
+}
+
 function Convert-SoftwareBitmapToBitmap {
     param([Parameter(Mandatory)]$SoftwareBitmap)
 
@@ -357,6 +404,7 @@ $script:AudioPath = $null
 $script:IsRefreshingSelection = $false
 $script:IsProcessingFrame = $false
 $script:FrameTickCount = 0
+$script:AutoPreviewEnabled = $false
 
 $form = [System.Windows.Forms.Form]::new()
 $form.Text = 'CameraIR Viewer'
@@ -423,6 +471,7 @@ $btnStart.Text = 'Iniciar preview'
 $btnStart.Top = 196
 $btnStart.Left = 12
 $btnStart.Width = 150
+$btnStart.Visible = $false
 $leftPanel.Controls.Add($btnStart)
 
 $btnStop = [System.Windows.Forms.Button]::new()
@@ -430,55 +479,57 @@ $btnStop.Text = 'Detener'
 $btnStop.Top = 196
 $btnStop.Left = 182
 $btnStop.Width = 150
+$btnStop.Visible = $false
 $leftPanel.Controls.Add($btnStop)
 
 $btnPhoto = [System.Windows.Forms.Button]::new()
 $btnPhoto.Text = 'Tomar foto PNG'
-$btnPhoto.Top = 236
+$btnPhoto.Top = 206
 $btnPhoto.Left = 12
 $btnPhoto.Width = 150
 $leftPanel.Controls.Add($btnPhoto)
 
 $chkAudio = [System.Windows.Forms.CheckBox]::new()
 $chkAudio.Text = 'Incluir audio en video'
-$chkAudio.Top = 241
+$chkAudio.Top = 211
 $chkAudio.Left = 182
 $chkAudio.Width = 160
+$chkAudio.Checked = $true
 $leftPanel.Controls.Add($chkAudio)
 
 $btnVideo = [System.Windows.Forms.Button]::new()
 $btnVideo.Text = 'Grabar video'
-$btnVideo.Top = 276
+$btnVideo.Top = 246
 $btnVideo.Left = 12
 $btnVideo.Width = 150
 $leftPanel.Controls.Add($btnVideo)
 
 $btnBridge = [System.Windows.Forms.Button]::new()
 $btnBridge.Text = 'Puente virtual'
-$btnBridge.Top = 276
+$btnBridge.Top = 246
 $btnBridge.Left = 182
 $btnBridge.Width = 150
 $leftPanel.Controls.Add($btnBridge)
 
 $lblAudio = [System.Windows.Forms.Label]::new()
 $lblAudio.Text = 'Microfono para video'
-$lblAudio.Top = 316
+$lblAudio.Top = 286
 $lblAudio.Left = 12
 $lblAudio.Width = 320
 $leftPanel.Controls.Add($lblAudio)
 
 $cmbAudio = [System.Windows.Forms.ComboBox]::new()
-$cmbAudio.Top = 338
+$cmbAudio.Top = 308
 $cmbAudio.Left = 12
 $cmbAudio.Width = 320
 $cmbAudio.DropDownStyle = 'DropDownList'
 $leftPanel.Controls.Add($cmbAudio)
 
 $txtMetadata = [System.Windows.Forms.TextBox]::new()
-$txtMetadata.Top = 376
+$txtMetadata.Top = 346
 $txtMetadata.Left = 12
 $txtMetadata.Width = 320
-$txtMetadata.Height = 330
+$txtMetadata.Height = 360
 $txtMetadata.Multiline = $true
 $txtMetadata.ScrollBars = 'Vertical'
 $txtMetadata.ReadOnly = $true
@@ -536,7 +587,14 @@ function Refresh-AudioDevices {
     }
 
     $cmbAudio.DisplayMember = 'Label'
-    $cmbAudio.SelectedIndex = 0
+    if ($cmbAudio.Items.Count -gt 1) {
+        $cmbAudio.SelectedIndex = 1
+        $chkAudio.Checked = $true
+    }
+    else {
+        $cmbAudio.SelectedIndex = 0
+        $chkAudio.Checked = $false
+    }
 }
 
 function Refresh-Sources {
@@ -579,8 +637,12 @@ function Refresh-Formats {
         Stop-Preview -KeepSelection
     }
 
+    $script:IsRefreshingSelection = $true
     $cmbFormat.Items.Clear()
-    if ($null -eq $cmbGroup.SelectedItem -or $null -eq $cmbSource.SelectedItem) { return }
+    if ($null -eq $cmbGroup.SelectedItem -or $null -eq $cmbSource.SelectedItem) {
+        $script:IsRefreshingSelection = $false
+        return
+    }
 
     try {
         Initialize-CaptureForSelectedGroup
@@ -600,15 +662,17 @@ function Refresh-Formats {
         }
         $cmbFormat.DisplayMember = 'Label'
         if ($cmbFormat.Items.Count -gt 0) { $cmbFormat.SelectedIndex = 0 }
+        $script:IsRefreshingSelection = $false
 
         Set-MetadataText "Grupo: $($cmbGroup.SelectedItem.Value.DisplayName)`r`nStream: $($script:CurrentSource.Info.SourceKind)`r`nActual: $(Get-FormatLabel $script:CurrentSource.CurrentFormat)`r`nFormatos: $($cmbFormat.Items.Count)"
         Write-AppLog "Selected source=$($script:CurrentSource.Info.Id) current=$(Get-FormatLabel $script:CurrentSource.CurrentFormat) formats=$($cmbFormat.Items.Count)"
 
-        if ($wasRunning) {
+        if ($wasRunning -or $script:AutoPreviewEnabled) {
             Start-Preview
         }
     }
     catch {
+        $script:IsRefreshingSelection = $false
         Write-AppException -Context 'Refresh-Formats failed' -Exception $_.Exception.ToString()
         Set-MetadataText $_.Exception.ToString()
     }
@@ -667,7 +731,12 @@ function Start-Recording {
     }
 
     $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-    $script:RecordDirectory = Join-Path $OutputDirectory "recording_$stamp"
+    $tempDirectory = Join-Path $OutputDirectory 'temp'
+    if (-not (Test-Path -LiteralPath $tempDirectory)) {
+        New-Item -ItemType Directory -Path $tempDirectory | Out-Null
+    }
+
+    $script:RecordDirectory = Join-Path $tempDirectory "recording_$stamp"
     New-Item -ItemType Directory -Path $script:RecordDirectory | Out-Null
 
     $script:RecordFrameIndex = 0
@@ -683,9 +752,7 @@ function Start-Recording {
 
         $psi = [System.Diagnostics.ProcessStartInfo]::new()
         $psi.FileName = $ffmpeg
-        $escapedAudioDevice = $audioDevice.Replace('"', '\"')
-        $escapedAudioPath = $script:AudioPath.Replace('"', '\"')
-        $psi.Arguments = "-y -f dshow -i `"audio=$escapedAudioDevice`" -acodec pcm_s16le `"$escapedAudioPath`""
+        $psi.Arguments = Join-ProcessArguments -Arguments @('-y', '-f', 'dshow', '-i', "audio=$audioDevice", '-acodec', 'pcm_s16le', $script:AudioPath)
         $psi.UseShellExecute = $false
         $psi.RedirectStandardInput = $true
         $psi.RedirectStandardError = $true
@@ -729,23 +796,24 @@ function Stop-Recording {
         throw 'No se capturaron frames para codificar.'
     }
 
-    $ffmpeg = Get-FfmpegPath
-    $outputFile = Join-Path $OutputDirectory ("CameraIR_{0:yyyyMMdd_HHmmss}.mp4" -f [DateTime]::Now)
+    $videoDirectory = Join-Path $OutputDirectory 'video'
+    if (-not (Test-Path -LiteralPath $videoDirectory)) {
+        New-Item -ItemType Directory -Path $videoDirectory | Out-Null
+    }
+
+    $outputFile = Join-Path $videoDirectory ("CameraIR_{0:yyyyMMdd_HHmmss}.mp4" -f [DateTime]::Now)
     $framesPattern = Join-Path $script:RecordDirectory 'frame_%06d.jpg'
     $elapsedSeconds = [Math]::Max(1, ([DateTimeOffset]::Now - $script:RecordStartedAt).TotalSeconds)
     $fps = [Math]::Max(1, [Math]::Round($script:RecordFrameIndex / $elapsedSeconds, 2))
 
-    $args = @('-y', '-framerate', "$fps", '-i', $framesPattern)
+    $args = @('-hide_banner', '-y', '-framerate', "$fps", '-i', $framesPattern)
     if ((Test-Path -LiteralPath $script:AudioPath) -and ((Get-Item -LiteralPath $script:AudioPath).Length -gt 44)) {
         $args += @('-i', $script:AudioPath, '-shortest')
     }
     $args += @('-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', $outputFile)
 
     Set-MetadataText "Codificando MP4...`r`nFrames: $($script:RecordFrameIndex)`r`nFPS estimado: $fps"
-    $encodeOutput = & $ffmpeg @args 2>&1 | Out-String
-    if ($LASTEXITCODE -ne 0) {
-        throw "ffmpeg fallo codificando video:`r`n$encodeOutput"
-    }
+    [void](Invoke-Ffmpeg -Arguments $args)
 
     [System.Windows.Forms.MessageBox]::Show("Video guardado:`n$outputFile", 'CameraIR Viewer') | Out-Null
     Set-MetadataText "Video guardado:`r`n$outputFile`r`nFrames: $($script:RecordFrameIndex)`r`nFPS estimado: $fps"
@@ -804,7 +872,7 @@ $cmbSource.Add_SelectedIndexChanged({
     if (-not $script:IsRefreshingSelection) { Refresh-Formats }
 })
 $cmbFormat.Add_SelectedIndexChanged({
-    if (-not $script:IsRefreshingSelection -and $timer.Enabled) {
+    if (-not $script:IsRefreshingSelection -and ($timer.Enabled -or $script:AutoPreviewEnabled)) {
         try {
             Stop-Preview -KeepSelection
             Start-Preview
@@ -843,6 +911,7 @@ $btnVideo.Add_Click({
         }
     }
     catch {
+        Write-AppException -Context 'Video button failed' -Exception $_.Exception.ToString()
         Set-MetadataText $_.Exception.ToString()
         [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, 'CameraIR Viewer') | Out-Null
     }
@@ -851,7 +920,10 @@ $btnBridge.Add_Click({
     [System.Windows.Forms.MessageBox]::Show('Puente virtual proximamente. La base sera este mismo capturador, publicando frames como camara virtual.', 'Proximamente') | Out-Null
 })
 $form.Add_Shown({
-    try { Start-Preview }
+    try {
+        $script:AutoPreviewEnabled = $true
+        Start-Preview
+    }
     catch { Set-MetadataText $_.Exception.ToString() }
 })
 $form.Add_FormClosing({ Stop-Preview })
