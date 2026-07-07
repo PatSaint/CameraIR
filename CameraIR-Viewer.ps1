@@ -405,6 +405,17 @@ $script:IsRefreshingSelection = $false
 $script:IsProcessingFrame = $false
 $script:FrameTickCount = 0
 $script:AutoPreviewEnabled = $false
+$script:IsSecurityMode = $false
+$script:SecurityLastAnalyzeAt = [DateTimeOffset]::MinValue
+$script:SecurityLastMotionAt = [DateTimeOffset]::MinValue
+$script:SecurityPreviousSamples = $null
+$script:SecurityCurrentCameraKind = 'Color'
+$script:SecurityDarkThreshold = 45
+$script:SecurityBrightThreshold = 60
+$script:SecurityMotionThreshold = 18
+$script:SecurityAnalyzeIntervalMs = 1000
+$script:SecurityMotionHoldSeconds = 2
+$script:RecordingPurpose = 'Manual'
 
 $form = [System.Windows.Forms.Form]::new()
 $form.Text = 'CameraIR Viewer'
@@ -489,20 +500,19 @@ $btnPhoto.Left = 12
 $btnPhoto.Width = 150
 $leftPanel.Controls.Add($btnPhoto)
 
-$chkAudio = [System.Windows.Forms.CheckBox]::new()
-$chkAudio.Text = 'Incluir audio en video'
-$chkAudio.Top = 211
-$chkAudio.Left = 182
-$chkAudio.Width = 160
-$chkAudio.Checked = $true
-$leftPanel.Controls.Add($chkAudio)
-
 $btnVideo = [System.Windows.Forms.Button]::new()
 $btnVideo.Text = 'Grabar video'
-$btnVideo.Top = 246
-$btnVideo.Left = 12
+$btnVideo.Top = 206
+$btnVideo.Left = 182
 $btnVideo.Width = 150
 $leftPanel.Controls.Add($btnVideo)
+
+$btnSecurity = [System.Windows.Forms.Button]::new()
+$btnSecurity.Text = 'Modo seguridad'
+$btnSecurity.Top = 246
+$btnSecurity.Left = 12
+$btnSecurity.Width = 150
+$leftPanel.Controls.Add($btnSecurity)
 
 $btnBridge = [System.Windows.Forms.Button]::new()
 $btnBridge.Text = 'Puente virtual'
@@ -511,25 +521,33 @@ $btnBridge.Left = 182
 $btnBridge.Width = 150
 $leftPanel.Controls.Add($btnBridge)
 
+$chkAudio = [System.Windows.Forms.CheckBox]::new()
+$chkAudio.Text = 'Incluir audio en video'
+$chkAudio.Top = 286
+$chkAudio.Left = 12
+$chkAudio.Width = 160
+$chkAudio.Checked = $true
+$leftPanel.Controls.Add($chkAudio)
+
 $lblAudio = [System.Windows.Forms.Label]::new()
 $lblAudio.Text = 'Microfono para video'
-$lblAudio.Top = 286
+$lblAudio.Top = 316
 $lblAudio.Left = 12
 $lblAudio.Width = 320
 $leftPanel.Controls.Add($lblAudio)
 
 $cmbAudio = [System.Windows.Forms.ComboBox]::new()
-$cmbAudio.Top = 308
+$cmbAudio.Top = 338
 $cmbAudio.Left = 12
 $cmbAudio.Width = 320
 $cmbAudio.DropDownStyle = 'DropDownList'
 $leftPanel.Controls.Add($cmbAudio)
 
 $txtMetadata = [System.Windows.Forms.TextBox]::new()
-$txtMetadata.Top = 346
+$txtMetadata.Top = 376
 $txtMetadata.Left = 12
 $txtMetadata.Width = 320
-$txtMetadata.Height = 360
+$txtMetadata.Height = 330
 $txtMetadata.Multiline = $true
 $txtMetadata.ScrollBars = 'Vertical'
 $txtMetadata.ReadOnly = $true
@@ -552,6 +570,212 @@ function Set-CameraSelectionEnabled {
     $cmbFormat.Enabled = $Enabled
     $cmbAudio.Enabled = $Enabled
     $chkAudio.Enabled = $Enabled
+}
+
+function Set-OperationalButtonsEnabled {
+    param([bool]$Enabled)
+
+    $btnPhoto.Enabled = $Enabled
+    $btnVideo.Enabled = $Enabled
+}
+
+function Find-GroupItemByName {
+    param([string]$Name)
+
+    foreach ($item in $cmbGroup.Items) {
+        if ($item.Value.DisplayName -eq $Name) {
+            return $item
+        }
+    }
+
+    return $null
+}
+
+function Find-SourceItemByKind {
+    param([string]$Kind)
+
+    foreach ($item in $cmbSource.Items) {
+        if ($item.Value.SourceKind.ToString() -eq $Kind) {
+            return $item
+        }
+    }
+
+    return $null
+}
+
+function Find-FormatItemByLabelMatch {
+    param([string]$Pattern)
+
+    foreach ($item in $cmbFormat.Items) {
+        if ($item.Label -like $Pattern) {
+            return $item
+        }
+    }
+
+    return $null
+}
+
+function Set-ComboSelectedItem {
+    param(
+        [System.Windows.Forms.ComboBox]$Combo,
+        $TargetItem
+    )
+
+    for ($i = 0; $i -lt $Combo.Items.Count; $i++) {
+        if ($Combo.Items[$i] -eq $TargetItem) {
+            $Combo.SelectedIndex = $i
+            return
+        }
+    }
+}
+
+function Set-SecurityModeUi {
+    param([bool]$Enabled)
+
+    Set-CameraSelectionEnabled (-not $Enabled)
+    Set-OperationalButtonsEnabled (-not $Enabled)
+    $btnBridge.Enabled = (-not $Enabled)
+    $btnSecurity.Text = if ($Enabled) { 'Detener seguridad' } else { 'Modo seguridad' }
+}
+
+function Get-CurrentCameraKind {
+    if ($null -eq $script:CurrentSource) { return 'Color' }
+    return $script:CurrentSource.Info.SourceKind.ToString()
+}
+
+function Get-SecurityAnalysisStats {
+    param([Parameter(Mandatory)]$SoftwareBitmap)
+
+    $converted = $null
+    try {
+        $converted = [Windows.Graphics.Imaging.SoftwareBitmap]::Convert(
+            $SoftwareBitmap,
+            [Windows.Graphics.Imaging.BitmapPixelFormat]::Bgra8,
+            [Windows.Graphics.Imaging.BitmapAlphaMode]::Premultiplied
+        )
+
+        $width = $converted.PixelWidth
+        $height = $converted.PixelHeight
+        $bytes = Get-BitmapBytes -Bitmap $converted -ByteCount ($width * $height * 4)
+        $gridWidth = 32
+        $gridHeight = 24
+        $stepX = [Math]::Max(1, [int][Math]::Floor($width / $gridWidth))
+        $stepY = [Math]::Max(1, [int][Math]::Floor($height / $gridHeight))
+        $samples = New-Object byte[] ($gridWidth * $gridHeight)
+        $sum = 0
+        $index = 0
+
+        for ($gy = 0; $gy -lt $gridHeight; $gy++) {
+            $sampleY = [Math]::Min($height - 1, ($gy * $stepY) + [int]($stepY / 2))
+            for ($gx = 0; $gx -lt $gridWidth; $gx++) {
+                $sampleX = [Math]::Min($width - 1, ($gx * $stepX) + [int]($stepX / 2))
+                $offset = (($sampleY * $width) + $sampleX) * 4
+                $b = $bytes[$offset]
+                $g = $bytes[$offset + 1]
+                $r = $bytes[$offset + 2]
+                $luma = [byte][Math]::Round((0.114 * $b) + (0.587 * $g) + (0.299 * $r))
+                $samples[$index++] = $luma
+                $sum += $luma
+            }
+        }
+
+        return [pscustomobject]@{
+            AverageLuma = [int][Math]::Round($sum / $samples.Length)
+            Samples = $samples
+            Width = $gridWidth
+            Height = $gridHeight
+        }
+    }
+    finally {
+        if ($converted -is [System.IDisposable]) { $converted.Dispose() }
+    }
+}
+
+function Measure-SampleDelta {
+    param(
+        [byte[]]$Current,
+        [byte[]]$Previous
+    )
+
+    if ($null -eq $Current -or $null -eq $Previous -or $Current.Length -ne $Previous.Length) {
+        return [double]::PositiveInfinity
+    }
+
+    $sum = 0
+    for ($i = 0; $i -lt $Current.Length; $i++) {
+        $sum += [Math]::Abs([int]$Current[$i] - [int]$Previous[$i])
+    }
+
+    return $sum / $Current.Length
+}
+
+function Set-SecurityCameraKind {
+    param([string]$DesiredKind)
+
+    $groupItem = Find-GroupItemByName 'Rts-DMFT-Group'
+    if ($null -eq $groupItem) {
+        throw 'No se encontro el grupo combinado Rts-DMFT-Group necesario para Modo Seguridad.'
+    }
+
+    $script:IsRefreshingSelection = $true
+    try {
+        Set-ComboSelectedItem -Combo $cmbGroup -TargetItem $groupItem
+        Refresh-Sources
+
+        $sourceItem = Find-SourceItemByKind $DesiredKind
+        if ($null -eq $sourceItem) {
+            throw "No se encontro una fuente $DesiredKind dentro de Rts-DMFT-Group."
+        }
+
+        Set-ComboSelectedItem -Combo $cmbSource -TargetItem $sourceItem
+        Refresh-Formats
+
+        $formatItem = Find-FormatItemByLabelMatch '*640x480*'
+        if ($null -ne $formatItem) {
+            Set-ComboSelectedItem -Combo $cmbFormat -TargetItem $formatItem
+        }
+    }
+    finally {
+        $script:IsRefreshingSelection = $false
+    }
+
+    Write-AppLog "Security camera selected kind=$DesiredKind"
+}
+
+function Start-SecurityMode {
+    if ($script:IsSecurityMode) { return }
+
+    if ($script:IsRecording) {
+        Stop-Recording
+    }
+
+    $script:IsSecurityMode = $true
+    Set-SecurityModeUi $true
+    Set-MetadataText 'Modo seguridad activo. Detecta movimiento, ajusta RGB/IR por luz y graba solo eventos.'
+    Write-AppLog 'Security mode enabled'
+
+    try {
+        Set-SecurityCameraKind 'Color'
+    }
+    catch {
+        Write-AppException -Context 'Security mode initial camera select failed' -Exception $_.Exception.ToString()
+    }
+}
+
+function Stop-SecurityMode {
+    if (-not $script:IsSecurityMode) { return }
+
+    if ($script:IsRecording) {
+        Stop-Recording
+    }
+
+    $script:IsSecurityMode = $false
+    $script:SecurityLastAnalyzeAt = [DateTimeOffset]::MinValue
+    $script:SecurityLastMotionAt = [DateTimeOffset]::MinValue
+    $script:SecurityPreviousSamples = $null
+    Set-SecurityModeUi $false
+    Set-MetadataText 'Modo seguridad detenido.'
+    Write-AppLog 'Security mode disabled'
 }
 
 function Get-GroupLabel {
@@ -729,6 +953,12 @@ function Stop-Preview {
 }
 
 function Start-Recording {
+    param(
+        [ValidateSet('Manual', 'Security')]
+        [string]$Purpose = 'Manual'
+    )
+
+    $script:RecordingPurpose = $Purpose
     Write-AppLog "Start-Recording audioChecked=$($chkAudio.Checked) audio=$($cmbAudio.SelectedItem.Label)"
     if ($script:IsRecording) { return }
     if ($null -eq $script:Reader) {
@@ -741,7 +971,7 @@ function Start-Recording {
     }
 
     $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-    $tempDirectory = Join-Path $OutputDirectory 'temp'
+    $tempDirectory = Join-Path $OutputDirectory (Join-Path 'temp' $Purpose.ToLowerInvariant())
     if (-not (Test-Path -LiteralPath $tempDirectory)) {
         New-Item -ItemType Directory -Path $tempDirectory | Out-Null
     }
@@ -799,16 +1029,29 @@ function Stop-Recording {
     Write-AppLog "Stop-Recording frames=$($script:RecordFrameIndex)"
     if (-not $script:IsRecording) { return }
 
+    $wasSecurityMode = $script:IsSecurityMode
     $script:IsRecording = $false
     $btnVideo.Text = 'Grabar video'
-    Set-CameraSelectionEnabled $true
     Stop-AudioRecording
 
     if ($script:RecordFrameIndex -le 0) {
+        if ($wasSecurityMode) {
+            Set-SecurityModeUi $true
+        }
+        else {
+            Set-CameraSelectionEnabled $true
+            Set-OperationalButtonsEnabled $true
+            $btnBridge.Enabled = $true
+        }
         throw 'No se capturaron frames para codificar.'
     }
 
-    $videoDirectory = Join-Path $OutputDirectory 'video'
+    $videoDirectory = if ($script:RecordingPurpose -eq 'Security') {
+        Join-Path $OutputDirectory 'security'
+    }
+    else {
+        Join-Path $OutputDirectory 'video'
+    }
     if (-not (Test-Path -LiteralPath $videoDirectory)) {
         New-Item -ItemType Directory -Path $videoDirectory | Out-Null
     }
@@ -825,10 +1068,21 @@ function Stop-Recording {
     $args += @('-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', $outputFile)
 
     Set-MetadataText "Codificando MP4...`r`nFrames: $($script:RecordFrameIndex)`r`nFPS estimado: $fps"
-    [void](Invoke-Ffmpeg -Arguments $args)
-
-    Set-MetadataText "Video guardado:`r`n$outputFile`r`nFrames: $($script:RecordFrameIndex)`r`nFPS estimado: $fps"
-    Write-AppLog "Recording encoded output=$outputFile frames=$($script:RecordFrameIndex) fps=$fps"
+    try {
+        [void](Invoke-Ffmpeg -Arguments $args)
+        Set-MetadataText "Video guardado:`r`n$outputFile`r`nFrames: $($script:RecordFrameIndex)`r`nFPS estimado: $fps"
+        Write-AppLog "Recording encoded output=$outputFile frames=$($script:RecordFrameIndex) fps=$fps"
+    }
+    finally {
+        if ($wasSecurityMode) {
+            Set-SecurityModeUi $true
+        }
+        else {
+            Set-CameraSelectionEnabled $true
+            Set-OperationalButtonsEnabled $true
+            $btnBridge.Enabled = $true
+        }
+    }
 }
 
 $timer.Add_Tick({
@@ -864,6 +1118,67 @@ $timer.Add_Tick({
         $script:FrameTickCount++
         if (($script:FrameTickCount % 50) -eq 0) {
             Write-AppLog "Preview frame tick=$($script:FrameTickCount) format=$($softwareBitmap.PixelWidth)x$($softwareBitmap.PixelHeight) $($softwareBitmap.BitmapPixelFormat) recording=$($script:IsRecording)"
+        }
+
+        if ($script:IsSecurityMode) {
+            $now = [DateTimeOffset]::Now
+            if (($now - $script:SecurityLastAnalyzeAt).TotalMilliseconds -ge $script:SecurityAnalyzeIntervalMs) {
+                $stats = Get-SecurityAnalysisStats -SoftwareBitmap $softwareBitmap
+                $delta = Measure-SampleDelta -Current $stats.Samples -Previous $script:SecurityPreviousSamples
+                $currentKind = Get-CurrentCameraKind
+                $targetKind = $currentKind
+                $switched = $false
+
+                if (-not $script:IsRecording) {
+                    if ($stats.AverageLuma -lt $script:SecurityDarkThreshold -and $currentKind -ne 'Infrared') {
+                        $targetKind = 'Infrared'
+                        $switched = $true
+                    }
+                    elseif ($stats.AverageLuma -gt $script:SecurityBrightThreshold -and $currentKind -ne 'Color') {
+                        $targetKind = 'Color'
+                        $switched = $true
+                    }
+                }
+
+                if ($null -eq $script:SecurityPreviousSamples) {
+                    $script:SecurityPreviousSamples = $stats.Samples
+                    $script:SecurityLastAnalyzeAt = $now
+                    Set-MetadataText "Modo seguridad activo`r`nLuma: $($stats.AverageLuma)`r`nMovimiento: inicializando...`r`nCamara: $currentKind`r`nGrabando evento: $($script:IsRecording)"
+                    return
+                }
+
+                if ($switched) {
+                    Set-MetadataText "Modo seguridad: luz=$($stats.AverageLuma) -> cambiando a $targetKind"
+                    Write-AppLog "Security brightness switch luma=$($stats.AverageLuma) target=$targetKind current=$currentKind"
+                    $script:SecurityPreviousSamples = $null
+                    $script:SecurityLastAnalyzeAt = $now
+                    try {
+                        Set-SecurityCameraKind $targetKind
+                    }
+                    catch {
+                        Write-AppException -Context 'Security camera switch failed' -Exception $_.Exception.ToString()
+                    }
+                    return
+                }
+
+                $script:SecurityPreviousSamples = $stats.Samples
+                $script:SecurityLastAnalyzeAt = $now
+
+                if ($delta -ge $script:SecurityMotionThreshold) {
+                    $script:SecurityLastMotionAt = $now
+                    if (-not $script:IsRecording) {
+                        Write-AppLog "Security motion detected delta=$([Math]::Round($delta, 2)) luma=$($stats.AverageLuma)"
+                        Start-Recording -Purpose 'Security'
+                    }
+                }
+
+                if ($script:IsRecording -and (($now - $script:SecurityLastMotionAt).TotalSeconds -ge $script:SecurityMotionHoldSeconds)) {
+                    Write-AppLog "Security motion timeout reached; stopping event clip"
+                    Stop-Recording
+                }
+
+                Set-MetadataText "Modo seguridad activo`r`nLuma: $($stats.AverageLuma)`r`nMovimiento: $([Math]::Round($delta, 2))`r`nCamara: $currentKind`r`nGrabando evento: $($script:IsRecording)"
+            }
         }
     }
     catch {
@@ -927,6 +1242,20 @@ $btnVideo.Add_Click({
     }
     catch {
         Write-AppException -Context 'Video button failed' -Exception $_.Exception.ToString()
+        Set-MetadataText $_.Exception.ToString()
+    }
+})
+$btnSecurity.Add_Click({
+    try {
+        if ($script:IsSecurityMode) {
+            Stop-SecurityMode
+        }
+        else {
+            Start-SecurityMode
+        }
+    }
+    catch {
+        Write-AppException -Context 'Security mode button failed' -Exception $_.Exception.ToString()
         Set-MetadataText $_.Exception.ToString()
     }
 })

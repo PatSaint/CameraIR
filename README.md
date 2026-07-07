@@ -19,11 +19,18 @@ The viewer supports:
 - MP4 recording through `ffmpeg` by encoding preview frames.
 - Optional microphone capture through FFmpeg/DirectShow.
 - A virtual bridge button marked as coming soon.
+- A security mode that prefers RGB in good light, switches to IR in the dark, and records motion-triggered event clips.
 
 Videos are saved under:
 
 ```text
 captures\video
+```
+
+Security event clips are saved under:
+
+```text
+captures\security
 ```
 
 ## Diagnostic Tools
