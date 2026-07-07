@@ -18,9 +18,45 @@ Add-Type -AssemblyName System.Drawing
 [void][Windows.Storage.Streams.Buffer,Windows.Storage.Streams,ContentType=WindowsRuntime]
 [void][Windows.Storage.Streams.DataReader,Windows.Storage.Streams,ContentType=WindowsRuntime]
 
+[System.Windows.Forms.Application]::SetUnhandledExceptionMode([System.Windows.Forms.UnhandledExceptionMode]::CatchException)
+[System.Windows.Forms.Application]::add_ThreadException({
+    param($sender, $eventArgs)
+    Write-AppException -Context 'WinForms ThreadException' -Exception $eventArgs.Exception.ToString()
+})
+[AppDomain]::CurrentDomain.add_UnhandledException({
+    param($sender, $eventArgs)
+    Write-AppException -Context 'AppDomain UnhandledException' -Exception $eventArgs.ExceptionObject.ToString()
+})
+
 if (-not (Test-Path -LiteralPath $OutputDirectory)) {
     New-Item -ItemType Directory -Path $OutputDirectory | Out-Null
 }
+
+$script:LogPath = Join-Path $OutputDirectory ('CameraIR_{0:yyyyMMdd_HHmmss}.log' -f [DateTime]::Now)
+
+function Write-AppLog {
+    param(
+        [string]$Message,
+        [string]$Level = 'INFO'
+    )
+
+    try {
+        $line = '[{0:yyyy-MM-dd HH:mm:ss.fff}] [{1}] {2}' -f [DateTime]::Now, $Level, $Message
+        Add-Content -LiteralPath $script:LogPath -Value $line -Encoding UTF8
+    }
+    catch {}
+}
+
+function Write-AppException {
+    param(
+        [string]$Context,
+        [object]$Exception
+    )
+
+    Write-AppLog -Level 'ERROR' -Message "$Context`r`n$Exception"
+}
+
+Write-AppLog "CameraIR Viewer starting. OutputDirectory=$OutputDirectory"
 
 function Await-WinRtOperation {
     param(
@@ -244,6 +280,8 @@ $script:RecordStartedAt = $null
 $script:AudioProcess = $null
 $script:AudioPath = $null
 $script:IsRefreshingSelection = $false
+$script:IsProcessingFrame = $false
+$script:FrameTickCount = 0
 
 $form = [System.Windows.Forms.Form]::new()
 $form.Text = 'CameraIR Viewer'
@@ -373,7 +411,7 @@ $txtMetadata.Font = [System.Drawing.Font]::new('Consolas', 9)
 $leftPanel.Controls.Add($txtMetadata)
 
 $timer = [System.Windows.Forms.Timer]::new()
-$timer.Interval = 33
+$timer.Interval = 100
 
 function Set-MetadataText {
     param([string]$Text)
@@ -417,6 +455,7 @@ function Refresh-AudioDevices {
 }
 
 function Refresh-Sources {
+    Write-AppLog "Refresh-Sources group=$($cmbGroup.SelectedItem.Label)"
     $script:IsRefreshingSelection = $true
     $cmbSource.Items.Clear()
     $groupItem = $cmbGroup.SelectedItem
@@ -449,6 +488,7 @@ function Initialize-CaptureForSelectedGroup {
 }
 
 function Refresh-Formats {
+    Write-AppLog "Refresh-Formats group=$($cmbGroup.SelectedItem.Label) source=$($cmbSource.SelectedItem.Label) wasRunning=$($timer.Enabled)"
     $wasRunning = $timer.Enabled
     if ($wasRunning) {
         Stop-Preview -KeepSelection
@@ -477,17 +517,20 @@ function Refresh-Formats {
         if ($cmbFormat.Items.Count -gt 0) { $cmbFormat.SelectedIndex = 0 }
 
         Set-MetadataText "Grupo: $($cmbGroup.SelectedItem.Value.DisplayName)`r`nStream: $($script:CurrentSource.Info.SourceKind)`r`nActual: $(Get-FormatLabel $script:CurrentSource.CurrentFormat)`r`nFormatos: $($cmbFormat.Items.Count)"
+        Write-AppLog "Selected source=$($script:CurrentSource.Info.Id) current=$(Get-FormatLabel $script:CurrentSource.CurrentFormat) formats=$($cmbFormat.Items.Count)"
 
         if ($wasRunning) {
             Start-Preview
         }
     }
     catch {
+        Write-AppException -Context 'Refresh-Formats failed' -Exception $_.Exception.ToString()
         Set-MetadataText $_.Exception.ToString()
     }
 }
 
 function Start-Preview {
+    Write-AppLog "Start-Preview group=$($cmbGroup.SelectedItem.Label) source=$($cmbSource.SelectedItem.Label) format=$($cmbFormat.SelectedItem.Label)"
     if ($null -eq $script:MediaCapture -or $null -eq $script:CurrentSource) {
         Initialize-CaptureForSelectedGroup
         Refresh-Formats
@@ -506,6 +549,7 @@ function Start-Preview {
 
     $timer.Start()
     $btnStart.Text = 'Preview activo'
+    Write-AppLog "Preview started status=$startStatus intervalMs=$($timer.Interval)"
 }
 
 function Stop-Preview {
@@ -518,6 +562,7 @@ function Stop-Preview {
     $timer.Stop()
     Dispose-CaptureState
     $btnStart.Text = 'Iniciar preview'
+    Write-AppLog "Preview stopped keepSelection=$KeepSelection"
 
     if (-not $KeepSelection) {
         Set-MetadataText 'Preview detenido.'
@@ -525,6 +570,7 @@ function Stop-Preview {
 }
 
 function Start-Recording {
+    Write-AppLog "Start-Recording audioChecked=$($chkAudio.Checked) audio=$($cmbAudio.SelectedItem.Label)"
     if ($script:IsRecording) { return }
     if ($null -eq $script:Reader) {
         Start-Preview
@@ -565,6 +611,7 @@ function Start-Recording {
     $script:IsRecording = $true
     $btnVideo.Text = 'Detener video'
     Set-MetadataText "Grabando frames en:`r`n$($script:RecordDirectory)"
+    Write-AppLog "Recording started directory=$($script:RecordDirectory)"
 }
 
 function Stop-AudioRecording {
@@ -586,6 +633,7 @@ function Stop-AudioRecording {
 }
 
 function Stop-Recording {
+    Write-AppLog "Stop-Recording frames=$($script:RecordFrameIndex)"
     if (-not $script:IsRecording) { return }
 
     $script:IsRecording = $false
@@ -616,9 +664,13 @@ function Stop-Recording {
 
     [System.Windows.Forms.MessageBox]::Show("Video guardado:`n$outputFile", 'CameraIR Viewer') | Out-Null
     Set-MetadataText "Video guardado:`r`n$outputFile`r`nFrames: $($script:RecordFrameIndex)`r`nFPS estimado: $fps"
+    Write-AppLog "Recording encoded output=$outputFile frames=$($script:RecordFrameIndex) fps=$fps"
 }
 
 $timer.Add_Tick({
+    if ($script:IsProcessingFrame) { return }
+    $script:IsProcessingFrame = $true
+
     try {
         if ($null -eq $script:Reader) { return }
         $frame = $script:Reader.TryAcquireLatestFrame()
@@ -644,10 +696,19 @@ $timer.Add_Tick({
 
         $recordText = if ($script:IsRecording) { "`r`nGrabando: frame $($script:RecordFrameIndex)" } else { '' }
         Set-MetadataText "Grupo: $($cmbGroup.SelectedItem.Value.DisplayName)`r`nStream: $($script:CurrentSource.Info.SourceKind)`r`nFormato: $($softwareBitmap.PixelWidth)x$($softwareBitmap.PixelHeight) $($softwareBitmap.BitmapPixelFormat)`r`nFrame duration: $($frame.Duration)`r`nSystemRelativeTime: $($frame.SystemRelativeTime)`r`nFoto dir: $OutputDirectory$recordText"
+
+        $script:FrameTickCount++
+        if (($script:FrameTickCount % 50) -eq 0) {
+            Write-AppLog "Preview frame tick=$($script:FrameTickCount) format=$($softwareBitmap.PixelWidth)x$($softwareBitmap.PixelHeight) $($softwareBitmap.BitmapPixelFormat) recording=$($script:IsRecording)"
+        }
     }
     catch {
         $timer.Stop()
+        Write-AppException -Context 'Preview timer failed' -Exception $_.Exception.ToString()
         Set-MetadataText $_.Exception.ToString()
+    }
+    finally {
+        $script:IsProcessingFrame = $false
     }
 })
 
